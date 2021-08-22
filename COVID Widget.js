@@ -3,10 +3,13 @@
 // icon-color: purple; icon-glyph: stethoscope;
 
 const LOCATIONS = ["US", "MA", "RI", "FL", "TX", "CA", "NY"];
-const METRICS = ["Cases", "Deaths", "Vaccinations", "People Vaccinated", "People Fully Vaccinated"];
-let metricEmojis = ["🦠", "💀", "💉", "💉🧍‍♂️", "✅💉"];
+const METRICS = ["Cases", "Deaths", "Infection Rate", "People Vaccinated", "People Fully Vaccinated"];
+let metricEmojis = ["Cases", "Deaths", "Infection Rate", "💉", "✅💉"];
 const getStateInfo = importModule("StateInfo.js");
 const stateInfo = getStateInfo();
+const getEnv = importModule("getEnv.js");
+const env = getEnv();
+
 let xScale;
 let maxScale;
 let xOffset = 0;
@@ -20,7 +23,7 @@ let savedData = {};
 // let X_SCALE = 365; // how many days to range from
 let currentMetric = METRICS[0];
 let toggledLocations = [];
-let beginDate = new Date("2020-01-21");
+// let beginDate = new Date("2020-01-21");
 // beginDate.setDate(beginDate.getDate() - X_SCALE);
 
 let outOf = {
@@ -35,7 +38,7 @@ let outOf = {
 let info = {
     total: {
         text: "Total: ",
-        getValue: (data, location, metric, widgetSize) => {
+        getValue: (data, metric, widgetSize) => {
             let val = data["Total " + metric];
             let comments = "";
             let population = outOf[metric];
@@ -47,133 +50,51 @@ let info = {
             return `${val.toLocaleString()} ${comments}`;
         },
     },
-    week: {
-        text: "Last 7 Days: ",
-        getValue: (data, location, metric) => {
-            let val = data[metric][data[metric].length - 1] - data[metric][data[metric].length - 1 - 7];
-            return val.toLocaleString();
-        },
-    },
     yesterday: {
         text: "Yesterday: ",
-        getValue: (data, location, metric) => {
-            let val = data[metric][data[metric].length - 1] - data[metric][data[metric].length - 2];
+        getValue: (data, metric) => {
+            let notNull = data[metric].filter(e => e);
+            let val = notNull[notNull.length - 1];
             return val.toLocaleString();
+            // return "";
         },
     },
     weekAverage: {
         text: "7 Day Average: ",
-        getValue: (data, location, metric) => {
+        getValue: (data, metric) => {
             let rolling = rollingAverage(data[metric], 7);
-            return rolling[rolling.length - 1].toLocaleString();
+            // return "";
+            return Math.round(rolling[rolling.length - 1]).toLocaleString();
         },
     },
 };
 
 async function getData(location, get) {
-    let data = {
-        Population: location == "US" ? 329227746 : stateInfo[location].pop,
+    const URL = `https://api.covidactnow.org/v2/${location == "US" ? "country" : "state"}/${location}.timeseries.json?apiKey=${env.COVID_API_KEY}`;
+    let req = new Request(URL);
+    let json = await req.loadJSON();
+
+    return {
+        "Total Cases": json.actuals.cases,
+        "Total Deaths": json.actuals.deaths,
+
+        Cases: json.actualsTimeseries.map(e => e.newCases),
+        Deaths: json.actualsTimeseries.map(e => e.newDeaths),
+
+        Vaccinations: json.actualsTimeseries.map((e, i, arr) => (e.vaccinesAdministered && arr[i - 1] && arr[i - 1].vaccinesAdministered ? e.vaccinesAdministered - arr[i - 1].vaccinesAdministered : null)),
+        "People Vaccinated": json.actualsTimeseries.map((e, i, arr) => (e.vaccinationsInitiated && arr[i - 1] && arr[i - 1].vaccinationsInitiated ? e.vaccinationsInitiated - arr[i - 1].vaccinationsInitiated : null)),
+        "People Fully Vaccinated": json.actualsTimeseries.map((e, i, arr) => (e.vaccinationsCompleted && arr[i - 1] && arr[i - 1].vaccinationsCompleted ? e.vaccinationsCompleted - arr[i - 1].vaccinationsCompleted : null)),
+
+        "Total Vaccinations": json.actuals.vaccinesAdministered,
+        "Total People Vaccinated": json.actuals.vaccinationsInitiated,
+        "Total People Fully Vaccinated": json.actuals.vaccinationsCompleted,
+
+        "Infection Rate": json.metricsTimeseries.map(e => e.infectionRate),
+        "Total Infection Rate": NaN,
+
+        Population: json.population,
+        dates: json.actualsTimeseries.map(e => new Date(e.date)),
     };
-
-    const US_URL = "https://raw.githubusercontent.com/nytimes/covid-19-data/master/us.csv";
-    const STATE_URL = "https://data.cdc.gov/resource/9mfq-cb36.json?state=" + location;
-    // const US_VACCINE_URL = "https://raw.githubusercontent.com/owid/covid-19-data/master/public/data/vaccinations/country_data/United%20States.csv";
-    // const STATE_VACCINE_URL = "https://raw.githubusercontent.com/owid/covid-19-data/master/public/data/vaccinations/us_state_vaccinations.csv";
-    const VACCINE_URL = `https://data.cdc.gov/resource/unsk-b7fc.json?location=${location}`;
-
-    const commasRegex = /,(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)/; // thanks stackoverflow (splits by commas but not in strings)
-
-    if (get.includes("Vaccin") || get == "All") {
-        let requestData = new Request(VACCINE_URL);
-        let jsonData = await requestData.loadJSON();
-
-        jsonData.sort((a, b) => new Date(a.date) - new Date(b.date));
-
-        let recent = jsonData[jsonData.length - 1];
-
-        data["Vaccinations"] = [];
-        data["People Vaccinated"] = [];
-        data["People Fully Vaccinated"] = [];
-
-        data["Total Vaccinations"] = +recent.administered;
-        data["Total People Vaccinated"] = +recent.administered_dose1_recip;
-        data["Total People Fully Vaccinated"] = +recent.series_complete_yes;
-
-        let mostRecentDate = new Date(recent.date);
-
-        for (let date = new Date(beginDate.valueOf()); date < mostRecentDate; date.setDate(date.getDate() + 1)) {
-            let i = jsonData.findIndex(e => Math.abs(new Date(e.date) - date) <= 60 * 60 * 1000 * 12);
-
-            if (!jsonData[i] || !jsonData[i].recip_administered || !jsonData[i].administered_dose1_recip || !jsonData[i].series_complete_yes) {
-                data["Vaccinations"].push(Math.max(...data["Vaccinations"]) || 0);
-                data["People Vaccinated"].push(Math.max(...data["People Vaccinated"]) || 0);
-                data["People Fully Vaccinated"].push(Math.max(...data["People Fully Vaccinated"]) || 0);
-                continue;
-            }
-
-            data["Vaccinations"].push(+jsonData[i].administered || 0);
-            data["People Vaccinated"].push(+jsonData[i].administered_dose1_recip || 0);
-            data["People Fully Vaccinated"].push(+jsonData[i].series_complete_yes || 0);
-        }
-    }
-
-    if (get == "All" || get == "Cases" || get == "Deaths") {
-        data.Cases = [];
-        data.Deaths = [];
-
-        if (location != "US") {
-            let requestData = new Request(STATE_URL);
-            let jsonData = await requestData.loadJSON();
-
-            jsonData.sort((a, b) => new Date(a.submission_date) - new Date(b.submission_date));
-
-            let recent = jsonData[jsonData.length - 1];
-            data["Total Cases"] = +recent.tot_cases;
-            data["Total Deaths"] = +recent.tot_death;
-
-            let mostRecentDate = new Date(recent.submission_date);
-
-            for (let date = new Date(beginDate.valueOf()); date < mostRecentDate; date.setDate(date.getDate() + 1)) {
-                let i = jsonData.findIndex(e => Math.abs(new Date(e.submission_date) - date) <= 60 * 60 * 1000 * 12);
-
-                if (!jsonData[i] || !jsonData[i].tot_cases || !jsonData[i].tot_death) {
-                    data.Cases.push(Math.max(...data.Cases) || 0);
-                    data.Deaths.push(Math.max(...data.Deaths) || 0);
-                    continue;
-                }
-
-                data.Cases.push(+jsonData[i].tot_cases);
-                data.Deaths.push(+jsonData[i].tot_death);
-            }
-        } else {
-            let requestData = new Request(US_URL);
-            let rawData = await requestData.loadString();
-            let rowsData = rawData.split("\n").slice(1);
-
-            let recent = rowsData[rowsData.length - 1].split(commasRegex);
-
-            data["Total Cases"] = +recent[1];
-            data["Total Deaths"] = +recent[2];
-
-            let mostRecentDate = new Date(recent[0]);
-
-            for (let date = new Date(beginDate.valueOf()); date < mostRecentDate; date.setDate(date.getDate() + 1)) {
-                let i = rowsData.findIndex(e => Math.abs(new Date(e.split(commasRegex)[0]) - date) <= 60 * 60 * 1000 * 12);
-                let current = rowsData[i]?.split(commasRegex);
-
-                if (!current || !current[0] || !current[1]) {
-                    data.Cases.push(Math.max(...data.Cases) || 0);
-                    data.Deaths.push(Math.max(...data.Deaths) || 0);
-                    continue;
-                }
-                //        data.date.push(new Date(current[0]));
-                data.Cases.push(current[1]);
-                data.Deaths.push(current[2]);
-            }
-        }
-    }
-
-    return data;
 }
 
 async function makeWidget(widgetSize, location, metric, data) {
@@ -196,25 +117,26 @@ async function makeWidget(widgetSize, location, metric, data) {
     let color;
     if (currentMetric.includes("Vacc")) {
         color = Color.green();
-    } else if (currentMetric == "Cases") {
+    } else if (currentMetric == "Cases" || currentMetric == "Infection Rate") {
         color = Color.purple();
     } else {
         color = Color.red();
     }
 
-    drawGraph(canvas, rollingAverage(data[metric], 7), color);
+    drawGraph(canvas, rollingAverage(data[metric], 14), color);
 
     canvas.setFont(Font.boldSystemFont(12));
     canvas.drawTextInRect(`${location} ${metric}:`, new Rect(2, 2, 200, 15));
 
-    canvas.setFont(Font.regularSystemFont(12));
-    canvas.drawTextInRect(info.total.getValue(data, location, metric, widgetSize), new Rect(2, 14, 500, 15));
-
+    if (data["Total " + metric]) {
+        canvas.setFont(Font.regularSystemFont(12));
+        canvas.drawTextInRect(info.total.getValue(data, metric, widgetSize), new Rect(2, 14, 500, 15));
+    }
     canvas.setFont(Font.boldSystemFont(12));
     canvas.drawTextInRect("Daily:", new Rect(2, 28, 200, 15));
 
     canvas.setFont(Font.regularSystemFont(12));
-    canvas.drawTextInRect(info.weekAverage.getValue(data, location, metric, widgetSize), new Rect(2, 40, 200, 15));
+    canvas.drawTextInRect(info.weekAverage.getValue(data, metric, widgetSize), new Rect(2, 40, 200, 15));
 
     const canvImage = canvas.getImage();
 
@@ -226,9 +148,13 @@ async function makeWidget(widgetSize, location, metric, data) {
     let fm = FileManager.iCloud();
     let end = widgetSize == "small" ? "BGMiddleLeft" : "BG";
     let path = fm.documentsDirectory() + "/" + widgetSize + end + ".jpg";
-    await fm.downloadFileFromiCloud(path);
-    let img = fm.readImage(path);
-    widget.backgroundImage = img;
+    try {
+        await fm.downloadFileFromiCloud(path);
+        let img = fm.readImage(path);
+        widget.backgroundImage = img;
+    } catch (e) {
+        console.log("no file");
+    }
 
     return widget;
 }
@@ -245,6 +171,9 @@ function drawGraph(canvas, data, color, globalMax) {
     let oldPt;
 
     for (let i = 0; i < data.length; i++) {
+        if (data[i] == null) {
+            continue;
+        }
         let pt = new Point(mapRange(i, 0, data.length, 0, canvas.size.width - 5), mapRange(data[i], 0, max, 95, 5));
         path.move(pt);
         if (oldPt) {
@@ -256,7 +185,7 @@ function drawGraph(canvas, data, color, globalMax) {
     canvas.strokePath();
 }
 
-function drawGraphWithAxes(data, color, canvas, globalMax, index) {
+function drawGraphWithAxes(data, color, canvas, globalMax, dates, index) {
     canvas.setFillColor(Color.black());
 
     canvas.setTextColor(Color.white());
@@ -268,7 +197,7 @@ function drawGraphWithAxes(data, color, canvas, globalMax, index) {
     canvas.setLineWidth(1);
     canvas.setFontSize(8);
     let [maxX, maxY] = plot(data.indexOf(max), max);
-    let maxDate = new Date(beginDate.valueOf() + data.indexOf(max) * 60 * 60 * 24 * 1000);
+    let maxDate = new Date(dates[data.indexOf(max)]);
 
     canvas.setStrokeColor(new Color(color.hex, 0.5));
     canvas.strokeRect(new Rect(0, maxY, maxX, 0));
@@ -296,7 +225,7 @@ async function addGraphsToTable(table) {
     if (toggledLocations.length > 0) {
         let header = new UITableRow();
         header.isHeader = true;
-        header.addText(currentMetric + " per 100,000");
+        header.addText(currentMetric + (Object.keys(outOf).includes(currentMetric) ? " per 100,000" : ""));
         table.addRow(header);
     }
 
@@ -315,8 +244,12 @@ async function addGraphsToTable(table) {
             maxScale = savedData[location][currentMetric].length;
             xScale = maxScale;
         }
-        let data = rollingAverage(savedData[location][currentMetric], 7).map(e => (e / stateInfo[location].pop) * 100000);
+        let data = rollingAverage(savedData[location][currentMetric], 14); // .map(e => (e / stateInfo[location].pop) * 100000);
         // .slice(xOffset, xOffset + xScale);
+        if (Object.keys(outOf).includes(currentMetric)) {
+            data = data.map(e => (e / savedData[location].Population) * 100000);
+        }
+
         globalMax = Math.max(globalMax, Math.max(...data));
     }
 
@@ -325,21 +258,21 @@ async function addGraphsToTable(table) {
 
         if (currentMetric.includes("Vacc")) {
             color = vaccineColors[toggledLocations.indexOf(location)];
-        } else if (currentMetric == "Cases") {
+        } else if (currentMetric == "Cases" || currentMetric == "Infection Rate") {
             color = casesColors[toggledLocations.indexOf(location)];
         } else {
             color = deathsColors[toggledLocations.indexOf(location)];
         }
 
-        drawGraphWithAxes(
-            rollingAverage(savedData[location][currentMetric], 7)
-                .map(e => (e / stateInfo[location].pop) * 100000)
-                .slice(xOffset, xOffset + xScale),
-            color,
-            canvas,
-            globalMax,
-            toggledLocations.indexOf(location)
-        );
+        let data = rollingAverage(savedData[location][currentMetric], 14)
+            //.map(e => (e / stateInfo[location].pop) * 100000)
+            .slice(xOffset, xOffset + xScale);
+
+        if (Object.keys(outOf).includes(currentMetric)) {
+            data = data.map(e => (e / savedData[location].Population) * 100000);
+        }
+
+        drawGraphWithAxes(data, color, canvas, globalMax, savedData[location].dates.slice(xOffset, xOffset + xScale), toggledLocations.indexOf(location));
     }
     let graphRow = new UITableRow();
     graphRow.addImage(canvas.getImage());
@@ -351,7 +284,7 @@ function addSummariesToTable(table) {
     for (let location of toggledLocations) {
         if (currentMetric.includes("Vacc")) {
             color = vaccineColors[toggledLocations.indexOf(location)];
-        } else if (currentMetric == "Cases") {
+        } else if (currentMetric == "Cases" || currentMetric == "Infection Rate") {
             color = casesColors[toggledLocations.indexOf(location)];
         } else {
             color = deathsColors[toggledLocations.indexOf(location)];
@@ -365,7 +298,7 @@ function addSummariesToTable(table) {
 
         for (let key in info) {
             let row = new UITableRow();
-            row.addText(info[key].text + info[key].getValue(savedData[location], location, currentMetric));
+            row.addText(info[key].text + info[key].getValue(savedData[location], currentMetric));
 
             table.addRow(row);
         }
@@ -493,13 +426,17 @@ function rollingAverage(arr, win) {
             let count = 0;
 
             for (let j = i - win; j < i; j++) {
-                if (arr[j] && arr[j - 1]) {
-                    total += arr[j] - arr[j - 1];
+                if (arr[j]) {
+                    total += arr[j];
                     count++;
                 }
             }
 
-            return Math.round(total / count) || 0;
+            if (count == 0) {
+                return null;
+            }
+
+            return total / count || 0;
         })
         .slice(win);
 }
@@ -536,8 +473,8 @@ if (config.runsInWidget) {
         currentMetric = "Cases";
     }
 
-    let widget = await makeWidget(config.widgetFamily, toggledLocations[0], currentMetric);
-    // widget.present();
+    let widget = await makeWidget(config.widgetFamily || "Medium", toggledLocations[0], currentMetric);
+    // widget.presentMedium();
     Script.setWidget(widget);
 
     Script.complete();
